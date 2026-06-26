@@ -1,0 +1,9 @@
+store_id,store_name,store_area,store_location
+ST01,Downtown Bengaluru,4500.0,Bengaluru-Karnataka
+ST02,Koramangala Express,2200.0,Bengaluru-Karnataka
+ST03,Mumbai Andheri,5200.0,Mumbai-Maharashtra
+ST04,Delhi Connaught Place,6100.0,Delhi-Delhi
+ST05,Chennai T Nagar,3300.0,Chennai-TamilNadu
+ST06,Pune Hinjewadi,2800.0,Pune-Maharashtra
+ST07,Hyderabad Gachibowli,3900.0,Hyderabad-Telangana
+ST08,Kolkata Park Street,2600.0,Kolkata-WestBengal
