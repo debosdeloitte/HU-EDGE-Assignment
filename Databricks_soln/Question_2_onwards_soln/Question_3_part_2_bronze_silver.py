@@ -1,11 +1,10 @@
-# Databricks notebook source
 import dlt
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
 
 
 
-BASE = "/Volumes/retail_dataset/default/databricks_dataset"
+BASE = "/Volumes/ecommerce/raw/databricks_dataset"
 
 # Schemas for JSON string columns
 items_schema = ArrayType(StructType([
@@ -32,7 +31,7 @@ EVOLVE = {"delta.autoOptimize.optimizeWrite": "true",
 
 
 @dlt.table(comment="Raw events from CSV", table_properties=EVOLVE)
-def bronze_events():
+def bronze_events_dlt_q3_part2():
     return (spark.read.csv(f"{BASE}/events.csv", header=True, multiLine=True, nullValue="null", escape='"')
             .withColumn("items",     F.from_json("items",     items_schema))
             .withColumn("geo",       F.from_json("geo",       geo_schema))
@@ -42,19 +41,19 @@ def bronze_events():
             .withColumn("user_first_touch_timestamp", (F.col("user_first_touch_timestamp")/1e6).cast("timestamp")))
 
 @dlt.table(comment="Raw sales from CSV", table_properties=EVOLVE)
-def bronze_sales():
+def bronze_sales_dlt_q3_part2():
     return (spark.read.csv(f"{BASE}/sales.csv", header=True, multiLine=True, escape='"', nullValue="null", inferSchema=True)
             .withColumn("items", F.from_json("items", items_schema))
             .withColumn("transaction_timestamp", (F.col("transaction_timestamp")/1e6).cast("timestamp")))
 
 @dlt.table(comment="Raw users from CSV", table_properties=EVOLVE)
-def bronze_users():
+def bronze_users_dlt_q3_part2():
     return (spark.read.csv(f"{BASE}/users.csv", header=True, multiLine=True, nullValue="null", inferSchema=True)
             .withColumn("user_first_touch_timestamp", (F.col("user_first_touch_timestamp")/1e6).cast("timestamp")))
 
 
 @dlt.table(comment="Raw products (price catalog) from CSV", table_properties=EVOLVE)
-def bronze_products():
+def bronze_products_dlt_q3_part2():
     return spark.read.csv(f"{BASE}/products.csv", header=True, multiLine=True, nullValue="null", inferSchema=True)
 
 
@@ -67,14 +66,14 @@ def bronze_products():
 @dlt.table(comment="Cleansed events")
 @dlt.expect_or_drop("valid_user", "user_id IS NOT NULL")
 @dlt.expect("non_null_ts", "event_timestamp IS NOT NULL")
-def silver_events():
+def silver_events_dlt_q3_part2():
     return dlt.read("bronze_events").dropDuplicates()
 
 # NEW: the assignment's core Silver table — dedup + flatten + products enrichment.
 # (timestamps were already standardized to real `timestamp` type in Bronze.)
 @dlt.table(comment="Sales cleansed (dedup on order_id), flattened to item grain, enriched with product catalog")
 @dlt.expect_or_drop("valid_order", "order_id IS NOT NULL")
-def silver_sales_enriched():
+def silver_sales_enriched_dlt_q3_part2():
     sales = dlt.read("bronze_sales").dropDuplicates(["order_id"])           # remove duplicates
     products = dlt.read("bronze_products").select(
         "item_id",
@@ -87,12 +86,11 @@ def silver_sales_enriched():
 
 # Flattened event items (kept from your Part-1 pattern; used by Gold conversion + revenue)
 @dlt.table(comment="Flattened event items")
-def silver_event_items():
+def silver_event_items_dlt_q3_part2():
     return (dlt.read("bronze_events")
             .select("user_id", "event_name", "traffic_source", "event_timestamp",
                     F.col("geo.city").alias("city"), F.explode("items").alias("i"))
             .select("user_id", "event_name", "traffic_source", "event_timestamp", "city", "i.*"))
-
 
 
 

@@ -1,4 +1,3 @@
-# Databricks notebook source
 # GOLD 1: Monthly revenue by product and city.
 # Revenue + product + city co-exist only on purchase (finalize) events, so we
 # attribute completed-purchase revenue by month/product/city from those.
