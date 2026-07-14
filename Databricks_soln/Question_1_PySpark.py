@@ -44,7 +44,7 @@ events   = (spark.read.csv(f"{BASE}/events.csv", header=True, multiLine=True,nul
             .withColumn("geo", F.from_json("geo", geo_schema))
             .withColumn("ecommerce", F.from_json("ecommerce", ecom_schema)))
 
-# Readable timestamp columns
+
 # Cast epoch-microsecond timestamp columns to real timestamps (in place)
 sales  = sales.withColumn("transaction_timestamp",
              (F.col("transaction_timestamp")/1e6).cast("timestamp"))
@@ -91,18 +91,26 @@ display(count_df)
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 7
 # 1. Flatten Nested Columns: Flatten the items array in the sales and events tables, 
-    #creating separate columns for each field in the items array. 
+# creating separate columns for each field in the items array. 
+
 print("------","sales_items", " --------")    
 sales_items = (sales
     .select("order_id", "email", "transaction_timestamp", F.explode("items").alias("i"))
     .select("order_id", "email", "transaction_timestamp", "i.*"))
 display(sales_items)
+
 print("------","event_items", " --------")    
 events_items = (events
     .select("user_id", "event_name", "traffic_source", "event_timestamp",
-            F.explode("items").alias("i"))
-    .select("user_id", "event_name", "traffic_source", "event_timestamp", "i.*"))
+            "geo", "ecommerce", F.explode("items").alias("i"))
+    .select("user_id", "event_name", "traffic_source", "event_timestamp",
+            F.col("geo.city").alias("city"), F.col("geo.state").alias("state"),
+            F.col("ecommerce.purchase_revenue_in_usd").alias("purchase_revenue_in_usd"),
+            F.col("ecommerce.total_item_quantity").alias("total_item_quantity"),
+            F.col("ecommerce.unique_items").alias("unique_items"),
+            "i.*"))
 display(events_items)
 
 # COMMAND ----------
@@ -129,11 +137,12 @@ display(sales_priced.select("order_id","item_id","quantity","price_in_usd","prod
 # COMMAND ----------
 
 # 1. User Purchase Count: Join the users table with the sales table and compute the total number of purchases each user has made. 
-purchases_per_user = (sales.join(users, on="email", how="inner")
+purchases_per_user = (sales.join(users, on="email", how="left")   # keep every sale
     .groupBy("email")
     .agg(F.countDistinct("order_id").alias("num_purchases"))
     .orderBy(F.desc("num_purchases")))
 display(purchases_per_user)
+
 
 # COMMAND ----------
 
@@ -157,16 +166,33 @@ display(sales_items.groupBy("item_id").agg(
 
 # COMMAND ----------
 
-# 1. First Purchase Timing: Determine the average time between a user’s first touch and their first purchase. 
+# 1. First Purchase Timing: Determine the average time between a user’s first touch and their  first purchase
 
-first_touch    = users.groupBy("email").agg(F.min("user_first_touch_timestamp").alias("first_touch"))
-first_purchase = sales.groupBy("email").agg(F.min("transaction_timestamp").alias("first_purchase"))
+first_touch = (users
+    .filter(F.col("email").isNotNull())
+    .groupBy("email")
+    .agg(F.min("user_first_touch_timestamp").alias("first_touch")))
 
-display((first_purchase.join(first_touch, "email")
+# first purchase per user
+first_purchase = (sales
+    .groupBy("email")
+    .agg(F.min("transaction_timestamp").alias("first_purchase")))
+
+# hours between first touch and first purchase, per user
+touch_to_purchase = (first_purchase
+    .join(first_touch, "email", "inner")          # inner: no touch => interval undefined
     .withColumn("hours",
-        (F.col("first_purchase").cast("long") - F.col("first_touch").cast("long"))/3600).withColumnRenamed("email", "user")))
-    #.agg(F.round(F.avg("hours"), 2).alias("avg_hours_touch_to_purchase"))
-   
+        (F.col("first_purchase").cast("long") - F.col("first_touch").cast("long")) / 3600)
+    .withColumn("days", F.round(F.col("hours") / 24, 2)))
+
+# per-user detail
+display(touch_to_purchase.withColumnRenamed("email", "user").orderBy(F.desc("hours")))
+
+
+# display(touch_to_purchase.agg(
+#     F.round(F.avg("hours"), 2).alias("avg_hours_touch_to_purchase"),
+#     F.round(F.avg("hours") / 24, 2).alias("avg_days_touch_to_purchase"),
+#     F.count("*").alias("users_measured")))        
 
 # COMMAND ----------
 
@@ -221,7 +247,10 @@ display((events_items.groupBy("traffic_source")
 # COMMAND ----------
 
 # 3. Average Item Quantity per Purchase: Compute the average number of items purchased per transaction in the sales table. 
-display(sales.agg(F.round(F.avg("total_item_quantity"),4).alias("avg_items_per_purchase")))
+display(sales.agg(
+    F.count("order_id").alias("total_transactions"),          # 1 row = 1 transaction, confirmed
+    F.sum("total_item_quantity").alias("total_items_sold"),
+    F.round(F.avg("total_item_quantity"), 4).alias("avg_items_per_transaction")))
 
 # COMMAND ----------
 
@@ -283,10 +312,13 @@ display(summary)
 
 user_freq = (sales.groupBy("email").agg(
         F.countDistinct("order_id").alias("purchases"),
-        F.datediff(F.max("transaction_timestamp"), F.min("transaction_timestamp")).alias("span_days"))
-    .withColumn("active_days", F.greatest(F.col("span_days"), F.lit(1)))
-    .withColumn("purchase_frequency", F.round(F.col("purchases")/F.col("active_days"), 4)))
-display(user_freq.orderBy(F.desc("purchase_frequency")))
+        F.countDistinct(F.to_date("transaction_timestamp")).alias("active_days"),
+        F.min("transaction_timestamp").alias("first_purchase"),
+        F.max("transaction_timestamp").alias("last_purchase"))
+    .withColumn("tenure_days", F.datediff("last_purchase", "first_purchase"))
+    .withColumn("purchase_frequency",
+        F.round(F.col("purchases") / F.greatest("active_days", F.lit(1)), 4)))
+display(user_freq.orderBy(F.desc("purchases"), F.desc("purchase_frequency")))
 
 # COMMAND ----------
 
@@ -294,34 +326,17 @@ display(user_freq.orderBy(F.desc("purchase_frequency")))
 # 2. Items Purchased with Coupons: Determine the total revenue and quantity of items
 # purchased with coupons versus those without
 
-from pyspark.sql import Window
 coupon_summary = (sales_items
-    .withColumn("used_coupon", F.col("coupon").isNotNull())
-    .groupBy("used_coupon")
-    .agg(
-        F.round(F.sum("item_revenue_in_usd"), 2).alias("revenue"),
-        F.sum("quantity").alias("quantity")
-    )
-#     .withColumn("pct_revenue", F.round(F.col("revenue") / F.sum("revenue").over(Window.partitionBy()) * 100, 2))
-#     .withColumn("pct_quantity", F.round(F.col("quantity") / F.sum("quantity").over(Window.partitionBy()) * 100, 2))
-#     .orderBy("used_coupon")
-)
-
-
-# coupon_summary = (sales_items
-#     .withColumn("used_coupon", F.col("coupon").isNotNull())
-#     .groupBy("used_coupon")
-#     .agg(
-#         F.round(F.sum("item_revenue_in_usd"), 2).alias("revenue"),
-#         F.sum("quantity").alias("quantity")
-#     )
-#     .orderBy("used_coupon")
-# )
-
-# total_rev = coupon_summary.agg(F.sum("revenue")).first()[0]
-# total_qty = coupon_summary.agg(F.sum("quantity")).first()[0]
-
-
+    .withColumn("segment", F.when(F.col("coupon").isNotNull(), "coupon").otherwise("no_coupon"))
+    .groupBy("segment")
+    .agg(F.round(F.sum("item_revenue_in_usd"), 2).alias("revenue"),
+         F.sum("quantity").alias("quantity"),
+         F.count("*").alias("line_items"))
+    .withColumn("pct_revenue",
+        F.round(F.col("revenue") / F.sum("revenue").over(Window.partitionBy()) * 100, 2))
+    .withColumn("pct_quantity",
+        F.round(F.col("quantity") / F.sum("quantity").over(Window.partitionBy()) * 100, 2))
+    .orderBy(F.desc("revenue")))
 display(coupon_summary)
 
 # COMMAND ----------
@@ -330,14 +345,18 @@ display(coupon_summary)
 # 3. Product Purchase Correlation: Analyze the correlation between the number of items
 # purchased and the total revenue for each product.
 
-prod_stats = (sales_items.groupBy("item_id", "item_name").agg(
-    F.sum("quantity").alias("qty"),
-    F.round(F.sum("item_revenue_in_usd"), 2).alias("rev"))
+prod_stats = (sales_items.groupBy("item_id").agg(
+        F.first("item_name").alias("item_name"),
+        F.sum("quantity").alias("qty"),
+        F.round(F.sum("item_revenue_in_usd"), 2).alias("rev"),
+        F.round(F.avg("price_in_usd"), 2).alias("avg_price"))
     .orderBy(F.desc("rev")))
-
-corr_val = round(prod_stats.stat.corr("qty", "rev"), 4)
-
 display(prod_stats)
+
+prod_corr = prod_stats.stat.corr("qty", "rev")
+line_corr = sales_items.stat.corr("quantity", "item_revenue_in_usd")
+print(f"corr(qty, rev) across {prod_stats.count()} products = {prod_corr:.4f}")   
+print(f"corr at line-item grain (n={sales_items.count()})   = {line_corr:.4f}")
 
 
 
@@ -350,8 +369,7 @@ display(prod_stats)
 
 # DBTITLE 1,Cell 31
 # 1. Customer Lifetime Value (CLV): Estimate the Customer Lifetime Value for each user
-# based on their purchase history.
-# CLV = total revenue; enriched with orders count, avg order value, and active span.
+# based on their purchase history  CLV = total revenue; enriched with orders count, avg order value, and active span.
 
 clv = (sales.groupBy("email")
     .agg(
@@ -383,9 +401,24 @@ display((visitors.join(buyers, "traffic_source", "left")
 # 3. Churn Analysis: Identify users who have not made a purchase in the last 6 months and analyze the characteristics of these users
 
 latest = sales.agg(F.max("transaction_timestamp")).first()[0]
-last_purchase = sales.groupBy("email").agg(F.max("transaction_timestamp").alias("last_purchase"))
-churned = last_purchase.filter(F.col("last_purchase") < F.add_months(F.lit(latest), -6))
-print("Latest transaction date in data:", latest)
-print("Churned users (no purchase in last 6 months):", churned.count())
-# Note: this dataset only spans ~2 months (Jun-Jul 2020), so 0 churned is expected here.
-display(churned)
+
+recency = (sales.groupBy("email")
+    .agg(F.max("transaction_timestamp").alias("last_purchase"),
+         F.round(F.sum("purchase_revenue_in_usd"), 2).alias("revenue"))
+    .withColumn("days_since_last", F.datediff(F.lit(latest), "last_purchase")))
+
+CHURN_DAYS = 180  # parameterized; override for short datasets
+churned = recency.filter(F.col("days_since_last") >= CHURN_DAYS)
+print(f"latest={latest} | window={CHURN_DAYS}d | churned={churned.count()}")  # 0 on this data
+
+# Characteristic analysis via recency buckets (works on the short window)
+buckets = (recency
+    .withColumn("recency_bucket",
+        F.when(F.col("days_since_last") <= 7, "0-7d")
+         .when(F.col("days_since_last") <= 14, "8-14d")
+         .otherwise("15d+"))
+    .groupBy("recency_bucket")
+    .agg(F.count("*").alias("users"),
+         F.round(F.avg("revenue"), 2).alias("avg_revenue"))
+    .orderBy("recency_bucket"))
+display(buckets)
